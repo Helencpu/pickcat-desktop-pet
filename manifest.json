@@ -1,12 +1,21 @@
 {
   "manifest_version": 3,
   "name": "PICKCAT 网页小桌宠",
-  "version": "2.0.0",
-  "description": "一只来自 pickcat.dao3.fun 的小猫桌宠：可拎起放下、带重力与落地弹跳，点击会被压扁并发出小黄鸭的吱吱声。",
+  "version": "2.1.0",
+  "description": "一只来自 pickcat.dao3.fun 的小猫桌宠：可拎起放下、带重力与落地弹跳，点击会被压扁并发出小黄鸭的吱吱声；还可联动 PICKCAT 消息中心，直接读取自己的未读消息。",
   "author": "Doubao",
   "icons": {
     "128": "pet.png"
   },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "cookies"
+  ],
+  "host_permissions": [
+    "https://pickcat.dao3.fun/*"
+  ],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

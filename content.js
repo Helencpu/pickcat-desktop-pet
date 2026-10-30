@@ -135,7 +135,36 @@
     '  30%  { transform: scale(1.22, 0.78); }',
     '  65%  { transform: scale(0.92, 1.08); }',
     '  100% { transform: scale(1,1); }',
-    '}'
+    '}',
+    /* ---- PICKCAT 消息铃铛（挂在桌宠右上角） ---- */
+    '.pc-bell { position:absolute; right:-10px; top:-10px; width:26px; height:26px; border-radius:50%;',
+    '  background:rgba(255,255,255,.94); color:#d6543a; display:flex; align-items:center; justify-content:center;',
+    '  cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); border:1px solid rgba(0,0,0,.06);',
+    '  transition:transform .12s ease; z-index:3; }',
+    '.pc-bell:hover { transform:scale(1.12); }',
+    '.pc-bell svg { pointer-events:none; display:block; }',
+    '.pc-badge { position:absolute; top:-5px; right:-5px; min-width:15px; height:15px; line-height:15px;',
+    '  border-radius:8px; background:#e23636; color:#fff; font-size:10px; font-weight:700; text-align:center;',
+    '  padding:0 3px; box-sizing:border-box; display:none; font-family:inherit; }',
+    /* ---- 消息面板 ---- */
+    '.pc-panel { position:fixed; z-index:2147483646; width:280px; max-height:340px; display:none; flex-direction:column;',
+    '  background:#fff; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.22);',
+    '  font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; color:#333; overflow:hidden; }',
+    '.pc-panel.open { display:flex; }',
+    '.pc-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px;',
+    '  background:#fff6f1; border-bottom:1px solid #f0e0d6; font-size:13px; font-weight:700; color:#c4442a; }',
+    '.pc-head a { color:#c4442a; text-decoration:none; font-weight:600; cursor:pointer; }',
+    '.pc-head a:hover { text-decoration:underline; }',
+    '.pc-body { flex:1; overflow-y:auto; padding:6px 0; }',
+    '.pc-empty { padding:18px 12px; text-align:center; color:#999; font-size:13px; }',
+    '.pc-empty a { color:#c4442a; text-decoration:none; font-weight:600; }',
+    '.pc-item { padding:9px 12px; border-bottom:1px solid #f3eded; cursor:pointer; }',
+    '.pc-item:hover { background:#fff8f4; }',
+    '.pc-item.unread { background:#fff2ec; }',
+    '.pc-line { font-size:12.5px; color:#333; }',
+    '.pc-line b { color:#d6543a; font-weight:700; }',
+    '.pc-sub { font-size:12px; color:#777; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+    '.pc-time { font-size:11px; color:#bbb; margin-top:2px; }'
   ].join('\n');
   shadow.appendChild(style);
 
@@ -315,4 +344,220 @@
   document.addEventListener('selectstart', function (e) {
     if (held) e.preventDefault();
   });
+
+  /* =====================================================================
+   * PICKCAT 消息联动：读取自己的消息
+   * 在桌宠右上角加一个消息铃铛：未读角标 + 点击展开最近消息列表。
+   * 数据来源：pickcat.dao3.fun 的 notification-summary / notifications 接口。
+   * ===================================================================== */
+  var PICKCAT_ORIGIN = 'https://pickcat.dao3.fun';
+  var PICKCAT_POLL_MS = 60000;   // 未读数轮询间隔
+
+  var unreadCount = -1;
+  var panelOpen = false;
+  var bell = null, badge = null, panel = null;
+
+  var TYPE_TEXT = {
+    'REPLY_CREATED': '回复了你',
+    'WORK_COMMENT_REPLY_CREATED': '回复了你的作品评论',
+    'USER_MENTIONED': '在帖子中 @了你',
+    'WORK_COMMENT_MENTIONED': '在作品评论中 @了你',
+    'MANAGEMENT_ACTION': '系统通知',
+    'POST_LIKED': '赞了你的帖子',
+    'TOPIC_EVENT': '活动提醒',
+    'USER_FOLLOWED': '关注了你',
+    'LEVEL_CERTIFICATION': '等级认证',
+    'WORK_COMMENT_CREATED': '评论了你的作品',
+    'WORK_LIKED': '赞了你的作品',
+    'WORK_COMMENT_LIKED': '赞了你的作品评论'
+  };
+
+  function timeAgo(iso) {
+    if (!iso) return '';
+    var diff = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (diff < 60) return '刚刚';
+    if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+    if (diff < 86400 * 7) return Math.floor(diff / 86400) + ' 天前';
+    var d = new Date(iso);
+    return (d.getMonth() + 1) + '/' + d.getDate();
+  }
+
+  // 直接同源请求（仅当 content script 运行在 pickcat 域上，或在无 background 的预览页兜底）
+  function directPickcat(action) {
+    var url = PICKCAT_ORIGIN + (action === 'list'
+      ? '/api/v1/notifications?limit=20'
+      : '/api/v1/notification-summary');
+    return fetch(url, { credentials: 'include' }).then(function (r) {
+      if (r.status === 401) return { loggedOut: true };
+      if (!r.ok) return { error: 'http' + r.status };
+      return r.json();
+    }).catch(function (e) {
+      return { error: String(e) };
+    });
+  }
+
+  // 优先走 background（可在任意网页读取登录态消息）；无 background 时退回同源请求
+  function fetchPickcat(action) {
+    return new Promise(function (resolve) {
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        try {
+          chrome.runtime.sendMessage({ target: 'pickcat', action: action }, function (resp) {
+            if (chrome.runtime.lastError || !resp) { directPickcat(action).then(resolve); return; }
+            resolve(resp.data);
+          });
+          return;
+        } catch (e) { /* fall through to direct */ }
+      }
+      directPickcat(action).then(resolve);
+    });
+  }
+
+  function setBadge(n) {
+    if (!badge) return;
+    if (typeof n === 'number' && n > 0) {
+      badge.textContent = n > 99 ? '99+' : String(n);
+      badge.style.display = 'block';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function updateSummary() {
+    fetchPickcat('summary').then(function (d) {
+      if (d && typeof d.unreadCount === 'number') {
+        unreadCount = d.unreadCount;
+        setBadge(unreadCount);
+      } else if (d && d.loggedOut) {
+        unreadCount = -2;
+        setBadge(0);
+      } else {
+        unreadCount = -1;
+        setBadge(0);
+      }
+    });
+  }
+
+  // 构建铃铛
+  bell = document.createElement('div');
+  bell.className = 'pc-bell';
+  bell.title = 'PICKCAT 消息';
+  bell.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">' +
+    '<path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>';
+  badge = document.createElement('span');
+  badge.className = 'pc-badge';
+  bell.appendChild(badge);
+  wrap.appendChild(bell);
+
+  // 消息面板
+  panel = document.createElement('div');
+  panel.className = 'pc-panel';
+  panel.innerHTML =
+    '<div class="pc-head"><span>PICKCAT 消息</span>' +
+    '<a class="pc-open" href="' + PICKCAT_ORIGIN + '/notifications" target="_blank" rel="noopener">打开消息中心</a></div>' +
+    '<div class="pc-body"></div>';
+  shadow.appendChild(panel);
+
+  var body = panel.querySelector('.pc-body');
+
+  function positionPanel() {
+    var pw = 280;
+    var vpw = document.documentElement.clientWidth || window.innerWidth;
+    var vph = document.documentElement.clientHeight || window.innerHeight;
+    var left = px + PET_SIZE + 8;
+    if (left + pw > vpw) left = Math.max(4, px - pw - 8);
+    var top = Math.max(4, Math.min(py, vph - 340 - 8));
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
+  }
+
+  function renderStatus(text, withLogin) {
+    body.innerHTML = '<div class="pc-empty">' + text +
+      (withLogin ? '，<a href="' + PICKCAT_ORIGIN + '/login" target="_blank" rel="noopener">去登录</a>' : '') +
+      '</div>';
+  }
+
+  function renderList(items) {
+    var html = '';
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var actor = it.details && it.details.actor ? it.details.actor.username : '有人';
+      var typeText = TYPE_TEXT[it.type] || '有新动态';
+      var sub = '';
+      if (it.details && it.details.topic && it.details.topic.title) sub = it.details.topic.title;
+      else if (it.details && it.details.post && it.details.post.title) sub = it.details.post.title;
+      var unread = !it.readAt;
+      html += '<div class="pc-item' + (unread ? ' unread' : '') + '" data-idx="' + i + '">' +
+        '<div class="pc-line"><b>' + escapeHtml(actor) + '</b> · ' + escapeHtml(typeText) + '</div>' +
+        (sub ? '<div class="pc-sub">' + escapeHtml(sub) + '</div>' : '') +
+        '<div class="pc-time">' + timeAgo(it.createdAt) + '</div>' +
+        '</div>';
+    }
+    body.innerHTML = html;
+    var rows = body.querySelectorAll('.pc-item');
+    for (var j = 0; j < rows.length; j++) {
+      (function (row) {
+        row.addEventListener('click', function () {
+          window.open(PICKCAT_ORIGIN + '/notifications', '_blank');
+        });
+      })(rows[j]);
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function refreshList() {
+    renderStatus('正在读取消息…', false);
+    fetchPickcat('list').then(function (d) {
+      if (!panelOpen) return;
+      if (d && d.loggedOut) { renderStatus('未登录 PICKCAT', true); setBadge(0); return; }
+      if (d && d.error) { renderStatus('无法连接 PICKCAT', false); setBadge(0); return; }
+      var items = (d && d.items) || [];
+      if (!items.length) { renderStatus('暂无消息', false); return; }
+      renderList(items);
+      updateSummary();
+    });
+  }
+
+  function openPanel() {
+    panelOpen = true;
+    positionPanel();
+    panel.classList.add('open');
+    refreshList();
+  }
+
+  function closePanel() {
+    panelOpen = false;
+    panel.classList.remove('open');
+  }
+
+  function togglePanel() {
+    if (panelOpen) closePanel();
+    else openPanel();
+  }
+
+  // 铃铛点击：不触发拖拽
+  function stopAndToggle(e) {
+    e.stopPropagation();
+    e.preventDefault();
+    togglePanel();
+  }
+  bell.addEventListener('mousedown', stopAndToggle);
+  bell.addEventListener('touchstart', stopAndToggle, { passive: false });
+  bell.addEventListener('click', function (e) { e.stopPropagation(); });
+
+  // 点击铃铛/面板以外区域关闭面板
+  document.addEventListener('pointerdown', function (e) {
+    if (!panelOpen) return;
+    if (e.target === bell || bell.contains(e.target) || e.target === panel || panel.contains(e.target)) return;
+    closePanel();
+  });
+
+  // 定时刷新未读数 + 立即刷新一次
+  setInterval(updateSummary, PICKCAT_POLL_MS);
+  updateSummary();
 })();
